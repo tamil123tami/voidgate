@@ -33,6 +33,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
+    expose_headers=["X-VoidGate-Layer"],
 )
 
 connected_websockets: List[WebSocket] = []

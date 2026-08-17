@@ -43,7 +43,9 @@ class PhoenixProxyEngine:
         Streams response with mid-stream failover protection.
         Calls Groq API / Cloud provider with PhoenixProxy mid-stream failover monitoring.
         """
-        messages = payload.get("messages", [])
+        from app.layers.l4_dedup import context_deduplicator
+        reconstructed_payload = context_deduplicator.reconstruct_payload(payload)
+        messages = reconstructed_payload.get("messages", [])
         prompt_text = " ".join([m.get("content", "") for m in messages if m.get("role") == "user"])
 
         # Attempt live Groq API streaming if key is present

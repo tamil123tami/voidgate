@@ -174,7 +174,8 @@ class LocalSLMRouter:
             pass
 
         # 3. Default fallback if Ollama call fails or times out
-        fallback_resp = self._smart_fallback_response(last_prompt)
-        return True, fallback_resp
+        # We return False, None to allow falling back to subsequent layers (Cloud LLM)
+        # to ensure the user gets a relevant response instead of a dummy placeholder.
+        return False, None
 
 local_slm_router = LocalSLMRouter()
