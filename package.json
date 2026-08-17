@@ -1,0 +1,10 @@
+{
+  "name": "voidgate",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "cd frontend && npm run dev",
+    "frontend": "cd frontend && npm run dev",
+    "install-all": "cd frontend && npm install"
+  }
+}

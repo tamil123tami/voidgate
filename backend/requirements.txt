@@ -1,0 +1,21 @@
+# Core Framework
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+# HTTP Client
+httpx
+
+# Database
+aiosqlite
+
+# Environment & Configuration
+python-dotenv
+
+# WebSockets
+websockets
+
+# Additional dependencies for production
+redis
+
