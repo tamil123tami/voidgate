@@ -33,6 +33,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
+    expose_headers=["X-VoidGate-Layer"],
 )
 
 connected_websockets: List[WebSocket] = []
@@ -41,6 +42,22 @@ simulate_failover_flag: bool = False
 @app.on_event("startup")
 async def startup_event():
     await init_db()
+    # Warm up Ollama model on startup to eliminate cold-start latency
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{settings.ollama_url}/api/chat",
+                json={
+                    "model": settings.ollama_model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                    "keep_alive": "30m"
+                }
+            )
+            print(f"[Startup] Ollama model '{settings.ollama_model}' warmed up successfully")
+    except Exception as e:
+        print(f"[Startup] Ollama warm-up skipped: {str(e)}")
 
 async def broadcast_telemetry(log_item: Dict[str, Any]):
     stats = await get_summary_stats()
@@ -106,44 +123,54 @@ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
     user_prompt = " ".join([m.get("content", "") for m in messages if m.get("role") == "user"])
     req_id = f"vg-{int(start_time*1000)}"
 
+    # Detect multi-turn conversations: count user messages
+    # If this is a follow-up (more than 1 user message), skip L1/L2 caches
+    # because cached responses from isolated single-turn queries would lack context
+    user_message_count = sum(1 for m in messages if m.get("role") == "user")
+    is_multi_turn = user_message_count > 1
+
     # -------------------------------------------------------
     # Layer 1: Exact Hash Cache (< 1ms, $0)
+    # Skipped for multi-turn conversations to preserve context
     # -------------------------------------------------------
-    l1_hit = await exact_cache.get(payload)
-    if l1_hit:
-        latency_ms = round((time.time() - start_time) * 1000, 2)
-        saved_cost = 0.015
-        log_entry = {
-            "id": req_id, "timestamp": time.time(), "prompt": user_prompt,
-            "response": l1_hit, "layer": "L1 Exact Cache",
-            "latency_ms": latency_ms, "saved_cost": saved_cost,
-            "tokens_count": len(l1_hit.split()), "failover_events": 0
-        }
-        background_tasks.add_task(log_request, req_id, user_prompt, l1_hit, "L1 Exact Cache", latency_ms, saved_cost, len(l1_hit.split()), 0)
-        background_tasks.add_task(broadcast_telemetry, log_entry)
-        if is_stream:
-            return StreamingResponse(build_sse_gen(req_id, l1_hit, "L1 Exact Cache")(), media_type="text/event-stream", headers={"X-VoidGate-Layer": "L1 Exact Cache"})
-        return build_non_stream_response(req_id, l1_hit, "L1 Exact Cache")
+    if not is_multi_turn:
+        l1_hit = await exact_cache.get(payload)
+        if l1_hit:
+            latency_ms = round((time.time() - start_time) * 1000, 2)
+            saved_cost = 0.015
+            log_entry = {
+                "id": req_id, "timestamp": time.time(), "prompt": user_prompt,
+                "response": l1_hit, "layer": "L1 Exact Cache",
+                "latency_ms": latency_ms, "saved_cost": saved_cost,
+                "tokens_count": len(l1_hit.split()), "failover_events": 0
+            }
+            background_tasks.add_task(log_request, req_id, user_prompt, l1_hit, "L1 Exact Cache", latency_ms, saved_cost, len(l1_hit.split()), 0)
+            background_tasks.add_task(broadcast_telemetry, log_entry)
+            if is_stream:
+                return StreamingResponse(build_sse_gen(req_id, l1_hit, "L1 Exact Cache")(), media_type="text/event-stream", headers={"X-VoidGate-Layer": "L1 Exact Cache"})
+            return build_non_stream_response(req_id, l1_hit, "L1 Exact Cache")
 
     # -------------------------------------------------------
     # Layer 2: Semantic Similarity Cache (~14ms, $0)
+    # Skipped for multi-turn conversations to preserve context
     # -------------------------------------------------------
-    l2_result = await semantic_cache.get(payload)
-    if l2_result:
-        resp_text, score = l2_result
-        latency_ms = round((time.time() - start_time) * 1000, 2)
-        saved_cost = 0.015
-        log_entry = {
-            "id": req_id, "timestamp": time.time(), "prompt": user_prompt,
-            "response": resp_text, "layer": "L2 Semantic Cache",
-            "latency_ms": latency_ms, "saved_cost": saved_cost,
-            "tokens_count": len(resp_text.split()), "failover_events": 0
-        }
-        background_tasks.add_task(log_request, req_id, user_prompt, resp_text, "L2 Semantic Cache", latency_ms, saved_cost, len(resp_text.split()), 0)
-        background_tasks.add_task(broadcast_telemetry, log_entry)
-        if is_stream:
-            return StreamingResponse(build_sse_gen(req_id, resp_text, "L2 Semantic Cache")(), media_type="text/event-stream", headers={"X-VoidGate-Layer": "L2 Semantic Cache"})
-        return build_non_stream_response(req_id, resp_text, "L2 Semantic Cache")
+    if not is_multi_turn:
+        l2_result = await semantic_cache.get(payload)
+        if l2_result:
+            resp_text, score = l2_result
+            latency_ms = round((time.time() - start_time) * 1000, 2)
+            saved_cost = 0.015
+            log_entry = {
+                "id": req_id, "timestamp": time.time(), "prompt": user_prompt,
+                "response": resp_text, "layer": "L2 Semantic Cache",
+                "latency_ms": latency_ms, "saved_cost": saved_cost,
+                "tokens_count": len(resp_text.split()), "failover_events": 0
+            }
+            background_tasks.add_task(log_request, req_id, user_prompt, resp_text, "L2 Semantic Cache", latency_ms, saved_cost, len(resp_text.split()), 0)
+            background_tasks.add_task(broadcast_telemetry, log_entry)
+            if is_stream:
+                return StreamingResponse(build_sse_gen(req_id, resp_text, "L2 Semantic Cache")(), media_type="text/event-stream", headers={"X-VoidGate-Layer": "L2 Semantic Cache"})
+            return build_non_stream_response(req_id, resp_text, "L2 Semantic Cache")
 
     # -------------------------------------------------------
     # Layer 3: Local SLM Router (~50ms, ~$0)

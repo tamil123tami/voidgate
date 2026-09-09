@@ -151,30 +151,31 @@ class LocalSLMRouter:
         if instant_resp is not None:
             return True, instant_resp
 
-        # 2. Attempt Ollama call with a reduced timeout of 3.0 seconds
+        # 2. Attempt Ollama call with full conversation history
+        #    Uses /api/chat (multi-turn) so the local LLM remembers previous messages
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                # Use generate API with keep_alive to keep model loaded
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.post(
-                    f"{self.ollama_url}/api/generate",
+                    f"{self.ollama_url}/api/chat",
                     json={
                         "model": self.model,
-                        "prompt": last_prompt,
+                        "messages": messages,  # Send FULL conversation history
                         "stream": False,
                         "keep_alive": "10m"  # Keep model in memory for 10 minutes
                     }
                 )
                 if res.status_code == 200:
                     data = res.json()
-                    content = data.get("response", "")
+                    content = data.get("message", {}).get("content", "")
                     if content:
                         return True, content
         except Exception as e:
-            print(f"[L3] Ollama error: {str(e)} - using fallback")
+            print(f"[L3] Ollama error: {str(e)} - falling back to cloud")
             pass
 
         # 3. Default fallback if Ollama call fails or times out
-        fallback_resp = self._smart_fallback_response(last_prompt)
-        return True, fallback_resp
+        # We return False, None to allow falling back to subsequent layers (Cloud LLM)
+        # to ensure the user gets a relevant response instead of a dummy placeholder.
+        return False, None
 
 local_slm_router = LocalSLMRouter()
